@@ -375,7 +375,7 @@ def gerar_pdf_profissional(df: pd.DataFrame, titulo_relatorio="Relatório de Có
 
     tabela = Table(dados_tabela, colWidths=larguras, repeatRows=1)
     tabela.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F3B63")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2E7D32")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 8.5),
