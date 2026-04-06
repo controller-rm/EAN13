@@ -10,15 +10,16 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.platypus import (
     SimpleDocTemplate,
     Table,
     TableStyle,
     Paragraph,
     Spacer,
+    PageBreak,
 )
-from reportlab.lib import colors
+from reportlab.graphics.barcode import code128
 
 # ==========================================================
 # TENTA IMPORTAR AGGRID
@@ -109,6 +110,7 @@ def gerar_dun14(ean13: str, indicador: str) -> str:
 COLUNAS_ENTRADA = [
     "COD_FORNECEDOR",
     "CODIGO",
+    "DESCRICAO",
     "INDICADOR",
     "UNIDADE_POR_CAIXA",
     "UNIDADE_MEDIDA"
@@ -117,6 +119,7 @@ COLUNAS_ENTRADA = [
 COLUNAS_SAIDA = [
     "COD_FORNECEDOR",
     "CODIGO",
+    "DESCRICAO",
     "INDICADOR",
     "UNIDADE_POR_CAIXA",
     "UNIDADE_MEDIDA",
@@ -130,6 +133,7 @@ def linha_vazia():
     return {
         "COD_FORNECEDOR": "",
         "CODIGO": "",
+        "DESCRICAO": "",
         "INDICADOR": "1",
         "UNIDADE_POR_CAIXA": "",
         "UNIDADE_MEDIDA": "UN"
@@ -158,6 +162,7 @@ def validar_e_processar(df: pd.DataFrame) -> pd.DataFrame:
     mascara_vazia = (
         (df["COD_FORNECEDOR"] == "") &
         (df["CODIGO"] == "") &
+        (df["DESCRICAO"] == "") &
         (df["INDICADOR"] == "") &
         (df["UNIDADE_POR_CAIXA"] == "") &
         (df["UNIDADE_MEDIDA"] == "")
@@ -176,6 +181,7 @@ def validar_e_processar(df: pd.DataFrame) -> pd.DataFrame:
         try:
             cod_forn = row["COD_FORNECEDOR"]
             codigo = row["CODIGO"]
+            descricao = row["DESCRICAO"]
             indicador = row["INDICADOR"] if row["INDICADOR"] != "" else "1"
             und_caixa = row["UNIDADE_POR_CAIXA"]
             und_medida = row["UNIDADE_MEDIDA"]
@@ -189,6 +195,11 @@ def validar_e_processar(df: pd.DataFrame) -> pd.DataFrame:
                 raise ValueError("CODIGO deve conter no máximo 7 dígitos.")
             codigo_7 = codigo.zfill(7)
 
+            if descricao == "":
+                raise ValueError("DESCRICAO deve ser informada.")
+            if len(descricao) > 200:
+                raise ValueError("DESCRICAO deve ter no máximo 200 caracteres.")
+
             if not indicador.isdigit() or len(indicador) != 1:
                 raise ValueError("INDICADOR deve conter exatamente 1 dígito numérico.")
 
@@ -196,6 +207,9 @@ def validar_e_processar(df: pd.DataFrame) -> pd.DataFrame:
                 raise ValueError("UNIDADE_POR_CAIXA deve ser informada.")
             if not str(und_caixa).isdigit():
                 raise ValueError("UNIDADE_POR_CAIXA deve conter apenas números.")
+
+            if int(und_caixa) <= 0:
+                raise ValueError("UNIDADE_POR_CAIXA deve ser maior que zero.")
 
             if und_medida == "":
                 raise ValueError("UNIDADE_MEDIDA deve ser informada.")
@@ -231,13 +245,17 @@ def to_csv_brasil(df: pd.DataFrame) -> bytes:
 
 def carregar_csv(uploaded_file) -> pd.DataFrame:
     try:
-        return pd.read_csv(uploaded_file, sep=";", dtype=str, encoding="latin1")
+        df = pd.read_csv(uploaded_file, sep=";", dtype=str, encoding="utf-8-sig")
     except Exception:
         uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, sep=";", dtype=str, encoding="utf-8")
+        df = pd.read_csv(uploaded_file, sep=";", dtype=str, encoding="latin1")
 
+    # 🔥 REMOVE BOM + ESPAÇOS
+    df.columns = [c.replace("\ufeff", "").strip() for c in df.columns]
+
+    return df
 # ==========================================================
-# PDF PROFISSIONAL
+# PDF PROFISSIONAL (TABELA)
 # ==========================================================
 def rodape_canvas(canvas, doc):
     canvas.saveState()
@@ -313,7 +331,6 @@ def gerar_pdf_profissional(df: pd.DataFrame, titulo_relatorio="Relatório de Có
 
     elementos = []
 
-    # Cabeçalho
     elementos.append(Paragraph("Zionne (QM COMERCIO)", style_title))
     elementos.append(Paragraph(titulo_relatorio, style_subtitle))
     elementos.append(Spacer(1, 4))
@@ -341,8 +358,7 @@ def gerar_pdf_profissional(df: pd.DataFrame, titulo_relatorio="Relatório de Có
     elementos.append(Spacer(1, 10))
     elementos.append(Paragraph("Lista de produtos", style_section))
 
-    # Apenas colunas mais importantes para o PDF
-    colunas_pdf = ["COD_FORNECEDOR", "CODIGO", "UNIDADE_MEDIDA", "EAN13", "DUN14", "ERRO"]
+    colunas_pdf = ["COD_FORNECEDOR", "CODIGO", "DESCRICAO", "UNIDADE_MEDIDA", "EAN13", "DUN14", "ERRO"]
     df_pdf = df.copy()
 
     for col in colunas_pdf:
@@ -354,6 +370,7 @@ def gerar_pdf_profissional(df: pd.DataFrame, titulo_relatorio="Relatório de Có
     dados_tabela = [[
         Paragraph("<b>Cód. Fornecedor</b>", style_info),
         Paragraph("<b>Código</b>", style_info),
+        Paragraph("<b>Descrição</b>", style_info),
         Paragraph("<b>Und.</b>", style_info),
         Paragraph("<b>EAN13</b>", style_info),
         Paragraph("<b>DUN14</b>", style_info),
@@ -365,28 +382,29 @@ def gerar_pdf_profissional(df: pd.DataFrame, titulo_relatorio="Relatório de Có
         dados_tabela.append([
             Paragraph(str(row["COD_FORNECEDOR"]), style_info),
             Paragraph(str(row["CODIGO"]), style_info),
+            Paragraph(str(row["DESCRICAO"]), style_info),
             Paragraph(str(row["UNIDADE_MEDIDA"]), style_info),
             Paragraph(str(row["EAN13"]), style_info),
             Paragraph(str(row["DUN14"]), style_info),
             Paragraph(str(observacao), style_info),
         ])
 
-    larguras = [50 * mm, 22 * mm, 18 * mm, 42 * mm, 48 * mm, 82 * mm]
+    larguras = [36 * mm, 20 * mm, 70 * mm, 16 * mm, 34 * mm, 42 * mm, 50 * mm]
 
     tabela = Table(dados_tabela, colWidths=larguras, repeatRows=1)
     tabela.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dae7f5")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F3B63")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.2),
         ("LEADING", (0, 0), (-1, -1), 10),
         ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C7D0D9")),
         ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#95A5B0")),
         ("BACKGROUND", (0, 1), (-1, -1), colors.white),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (1, 1),  (2, -1), "CENTER"),
-        ("ALIGN", (3, 1),  (4, -1), "CENTER"),
+        ("ALIGN", (1, 1), (1, -1), "CENTER"),
+        ("ALIGN", (3, 1), (5, -1), "CENTER"),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ("TOPPADDING", (0, 0), (-1, -1), 6),
@@ -394,6 +412,277 @@ def gerar_pdf_profissional(df: pd.DataFrame, titulo_relatorio="Relatório de Có
     ]))
 
     elementos.append(tabela)
+
+    doc.build(elementos, onFirstPage=rodape_canvas, onLaterPages=rodape_canvas)
+    buffer.seek(0)
+    return buffer
+
+# ==========================================================
+# PDF DE ETIQUETAS SEM IMAGEM
+# ==========================================================
+def desenhar_codigo_barras_code128(codigo: str, largura_max=78 * mm, altura=10 * mm):
+    codigo = str(codigo).strip()
+
+    # Ajusta a espessura da barra de acordo com o tamanho do código
+    # para aproveitar melhor a largura disponível da etiqueta
+    if len(codigo) <= 13:
+        bar_width = 0.42
+    elif len(codigo) == 14:
+        bar_width = 0.40
+    else:
+        bar_width = 0.34
+
+    barcode = code128.Code128(
+        codigo,
+        barHeight=altura,
+        barWidth=bar_width,
+        humanReadable=False
+    )
+
+    # Centraliza o barcode dentro da largura disponível
+    largura_real = getattr(barcode, "width", largura_max)
+    espaco_esquerda = max((largura_max - largura_real) / 2, 0)
+
+    wrapper = Table(
+        [[barcode]],
+        colWidths=[largura_max]
+    )
+    wrapper.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), espaco_esquerda),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return wrapper
+
+
+def gerar_pdf_etiquetas_sem_imagem(df: pd.DataFrame, titulo="Etiquetas de Produtos") -> BytesIO:
+    """
+    Gera etiquetas em grade, com melhor aproveitamento da página.
+    - 2 etiquetas por linha
+    - várias linhas por página
+    - gera etiqueta Unidade (EAN13)
+    - gera etiqueta Caixa (DUN14) quando UNIDADE_POR_CAIXA > 1
+    """
+    buffer = BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=8 * mm,
+        rightMargin=8 * mm,
+        topMargin=8 * mm,
+        bottomMargin=10 * mm,
+        title=titulo,
+        author="ChatGPT",
+        subject="Etiquetas de produtos sem imagem",
+    )
+
+    styles = getSampleStyleSheet()
+
+    style_titulo = ParagraphStyle(
+        "TituloEtiqueta",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=14,
+        textColor=colors.HexColor("#1F4E79"),
+        alignment=TA_LEFT,
+        spaceAfter=2,
+    )
+
+    style_normal = ParagraphStyle(
+        "NormalEtiqueta",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=9,
+        textColor=colors.black,
+        alignment=TA_LEFT,
+    )
+
+    style_desc = ParagraphStyle(
+        "DescEtiqueta",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=9,
+        textColor=colors.black,
+        alignment=TA_LEFT,
+    )
+
+    style_codigo = ParagraphStyle(
+        "CodigoEtiqueta",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=9,
+        textColor=colors.black,
+        alignment=TA_CENTER,
+        spaceBefore=1,
+    )
+
+    style_rodape = ParagraphStyle(
+        "RodapeEtiqueta",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=7,
+        leading=8,
+        textColor=colors.HexColor("#444444"),
+        alignment=TA_CENTER,
+    )
+
+    df_ok = df[df["ERRO"].astype(str).str.strip() == ""].copy()
+    if df_ok.empty:
+        raise ValueError("Não há registros válidos para gerar as etiquetas.")
+
+    largura_util = A4[0] - doc.leftMargin - doc.rightMargin
+    col_width = largura_util / 2 - 3 * mm  # 2 colunas
+    etiquetas = []
+
+    def montar_etiqueta(sku, descricao, tipo, packing, codigo_barras, legenda_codigo, cod_fornecedor):
+        titulo_tbl = Table(
+            [[Paragraph("Etiquetas de Produtos", style_titulo)]],
+            colWidths=[col_width]
+        )
+        titulo_tbl.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#B7C4CE")),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+
+        info_top = Table(
+            [
+                [Paragraph(f"SKU: {sku}", style_normal)],
+                [Paragraph(f"Descrição: {descricao}", style_desc)],
+                [Paragraph(f"Tipo: {tipo}", style_normal)],
+                [Paragraph(f"Packing: {packing}", style_normal)],
+            ],
+            colWidths=[col_width]
+        )
+        info_top.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 1),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+        ]))
+
+        info_bottom = Table(
+            [
+                [Paragraph(f"{legenda_codigo}: {codigo_barras}", style_normal)],
+                [Paragraph(f"COD_FORNECEDOR: {cod_fornecedor}", style_rodape)],
+            ],
+            colWidths=[col_width]
+        )
+        info_bottom.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 1),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+        ]))
+
+        barcode = desenhar_codigo_barras_code128(
+            codigo_barras,
+            largura_max=col_width - 10 * mm,
+            altura=10 * mm
+        )
+
+        codigo_tbl = Table(
+            [[Paragraph(codigo_barras, style_codigo)]],
+            colWidths=[col_width]
+        )
+        codigo_tbl.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 1),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+
+        bloco = Table(
+            [[titulo_tbl], [info_top], [info_bottom], [barcode], [codigo_tbl]],
+            colWidths=[col_width]
+        )
+
+        bloco.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#B7C4CE")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+
+        return bloco
+
+    for _, row in df_ok.iterrows():
+        sku = str(row.get("CODIGO", "")).strip()
+        descricao = str(row.get("DESCRICAO", "")).strip()
+        und_medida = str(row.get("UNIDADE_MEDIDA", "UN")).strip()
+        ean13 = str(row.get("EAN13", "")).strip()
+        dun14 = str(row.get("DUN14", "")).strip()
+        und_caixa = str(row.get("UNIDADE_POR_CAIXA", "")).strip()
+        cod_fornecedor = str(row.get("COD_FORNECEDOR", "")).strip()
+
+        etiquetas.append(
+            montar_etiqueta(
+                sku=sku,
+                descricao=descricao,
+                tipo="Unidade",
+                packing=f"1 {und_medida}",
+                codigo_barras=ean13,
+                legenda_codigo="EAN13",
+                cod_fornecedor=cod_fornecedor
+            )
+        )
+
+        if und_caixa.isdigit() and int(und_caixa) > 1:
+            etiquetas.append(
+                montar_etiqueta(
+                    sku=sku,
+                    descricao=descricao,
+                    tipo="Caixa",
+                    packing=f"{und_caixa} {und_medida}",
+                    codigo_barras=dun14,
+                    legenda_codigo="DUN14",
+                    cod_fornecedor=cod_fornecedor
+                )
+            )
+
+    # monta grade 2 colunas
+    linhas = []
+    linha_atual = []
+
+    for etiqueta in etiquetas:
+        linha_atual.append(etiqueta)
+        if len(linha_atual) == 2:
+            linhas.append(linha_atual)
+            linha_atual = []
+
+    if linha_atual:
+        while len(linha_atual) < 2:
+            linha_atual.append("")
+        linhas.append(linha_atual)
+
+    grade = Table(
+        linhas,
+        colWidths=[col_width, col_width],
+        hAlign="LEFT"
+    )
+
+    grade.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+
+    elementos = [grade]
 
     doc.build(elementos, onFirstPage=rodape_canvas, onLaterPages=rodape_canvas)
     buffer.seek(0)
@@ -411,9 +700,9 @@ if "df_manual" not in st.session_state:
 st.sidebar.header("📂 CSV único")
 st.sidebar.markdown("Estrutura esperada do arquivo:")
 st.sidebar.code(
-    "COD_FORNECEDOR;CODIGO;INDICADOR;UNIDADE_POR_CAIXA;UNIDADE_MEDIDA\n"
-    "FORN001;1234567;1;12;UN\n"
-    "ABC-998;0000123;1;24;CX",
+    "COD_FORNECEDOR;CODIGO;DESCRICAO;INDICADOR;UNIDADE_POR_CAIXA;UNIDADE_MEDIDA\n"
+    "FORN001;1234567;CANECA GEOMETRICA HORTICOOL GREEN 300ML;1;12;UN\n"
+    "ABC998;0000131;CANECA GEOMETRICA HORTICOOL GREEN 300ML;1;1;UN",
     language="csv"
 )
 
@@ -426,16 +715,18 @@ modelo_df = pd.DataFrame([
     {
         "COD_FORNECEDOR": "FORN001",
         "CODIGO": "1234567",
+        "DESCRICAO": "CANECA GEOMETRICA HORTICOOL GREEN 300ML",
         "INDICADOR": "1",
         "UNIDADE_POR_CAIXA": "12",
         "UNIDADE_MEDIDA": "UN",
     },
     {
         "COD_FORNECEDOR": "ABC998",
-        "CODIGO": "0000123",
+        "CODIGO": "0000131",
+        "DESCRICAO": "CANECA GEOMETRICA HORTICOOL GREEN 300ML",
         "INDICADOR": "1",
-        "UNIDADE_POR_CAIXA": "24",
-        "UNIDADE_MEDIDA": "CX",
+        "UNIDADE_POR_CAIXA": "1",
+        "UNIDADE_MEDIDA": "UN",
     },
 ])
 
@@ -488,8 +779,9 @@ if AGGRID_OK:
         filter=False
     )
 
-    gb.configure_column("COD_FORNECEDOR", header_name="Código do Fornecedor", width=190)
-    gb.configure_column("CODIGO", header_name="Código", width=110)
+    gb.configure_column("COD_FORNECEDOR", header_name="Código do Fornecedor", width=180)
+    gb.configure_column("CODIGO", header_name="Código", width=100)
+    gb.configure_column("DESCRICAO", header_name="Descrição", width=350)
     gb.configure_column("INDICADOR", header_name="Indicador", width=90)
     gb.configure_column("UNIDADE_POR_CAIXA", header_name="Unidade por Caixa", width=150)
     gb.configure_column("UNIDADE_MEDIDA", header_name="Unidade Medida", width=130)
@@ -505,7 +797,7 @@ if AGGRID_OK:
         gridOptions=grid_options,
         update_mode=GridUpdateMode.VALUE_CHANGED,
         fit_columns_on_grid_load=False,
-        height=320,
+        height=340,
         allow_unsafe_jscode=True,
         theme="streamlit",
         reload_data=True,
@@ -534,6 +826,11 @@ else:
                 "Código",
                 max_chars=7,
                 help="Numérico com até 7 dígitos"
+            ),
+            "DESCRICAO": st.column_config.TextColumn(
+                "Descrição",
+                max_chars=200,
+                help="Descrição do produto"
             ),
             "INDICADOR": st.column_config.TextColumn(
                 "Indicador",
@@ -564,11 +861,11 @@ if st.button("⚙️ Gerar EAN13 e DUN14 da entrada manual", use_container_width
 
         st.markdown("### Lista de produtos")
         lista_produtos = resultado_manual[
-            ["COD_FORNECEDOR", "CODIGO", "EAN13", "DUN14"]
+            ["COD_FORNECEDOR", "CODIGO", "DESCRICAO", "EAN13", "DUN14"]
         ].copy()
         st.dataframe(lista_produtos, use_container_width=True, hide_index=True)
 
-        col_pdf1, col_pdf2 = st.columns(2)
+        col_pdf1, col_pdf2, col_pdf3 = st.columns(3)
 
         with col_pdf1:
             st.download_button(
@@ -588,6 +885,19 @@ if st.button("⚙️ Gerar EAN13 e DUN14 da entrada manual", use_container_width
                 "📄 Baixar PDF profissional",
                 data=pdf_manual,
                 file_name="relatorio_manual_ean_dun.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+
+        with col_pdf3:
+            pdf_etiquetas_manual = gerar_pdf_etiquetas_sem_imagem(
+                resultado_manual,
+                titulo="Etiquetas de Produtos"
+            )
+            st.download_button(
+                "🏷️ Baixar PDF etiquetas",
+                data=pdf_etiquetas_manual,
+                file_name="etiquetas_manual_sem_imagem.pdf",
                 mime="application/pdf",
                 use_container_width=True
             )
@@ -612,11 +922,11 @@ if uploaded_file is not None:
 
         st.markdown("### Lista de produtos")
         lista_csv = resultado_csv[
-            ["COD_FORNECEDOR", "CODIGO", "EAN13", "DUN14"]
+            ["COD_FORNECEDOR", "CODIGO", "DESCRICAO", "EAN13", "DUN14"]
         ].copy()
         st.dataframe(lista_csv, use_container_width=True, hide_index=True)
 
-        col_csv1, col_csv2 = st.columns(2)
+        col_csv1, col_csv2, col_csv3 = st.columns(3)
 
         with col_csv1:
             st.download_button(
@@ -640,6 +950,19 @@ if uploaded_file is not None:
                 use_container_width=True
             )
 
+        with col_csv3:
+            pdf_etiquetas_csv = gerar_pdf_etiquetas_sem_imagem(
+                resultado_csv,
+                titulo="Etiquetas de Produtos"
+            )
+            st.download_button(
+                "🏷️ Baixar PDF etiquetas",
+                data=pdf_etiquetas_csv,
+                file_name="etiquetas_csv_sem_imagem.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+
     except Exception as e:
         st.error(f"Erro ao processar o CSV: {e}")
 
@@ -652,8 +975,9 @@ with st.expander("📌 Estrutura esperada"):
 
 - `COD_FORNECEDOR` → alfanumérico, até 18 caracteres
 - `CODIGO` → numérico, até 7 dígitos
+- `DESCRICAO` → descrição do produto, até 200 caracteres
 - `INDICADOR` → 1 dígito numérico
-- `UNIDADE_POR_CAIXA` → numérico
+- `UNIDADE_POR_CAIXA` → numérico e maior que zero
 - `UNIDADE_MEDIDA` → ex.: UN, CX, KG
 """)
     st.dataframe(modelo_df, use_container_width=True, hide_index=True)
@@ -670,6 +994,7 @@ div.stButton > button:first-child {
     height: 42px;
     width: 100%;
     border: none;
+    font-weight: 600;
 }
 div.stButton > button:hover {
     background-color: #256b2a;
@@ -681,10 +1006,15 @@ div.stDownloadButton > button:first-child {
     border-radius: 8px;
     height: 42px;
     border: none;
+    width: 100%;
+    font-weight: 600;
 }
 div.stDownloadButton > button:hover {
     background-color: #0f4fa0;
     color: white;
+}
+[data-testid="stDataFrame"] {
+    border-radius: 8px;
 }
 </style>
 """, unsafe_allow_html=True)
